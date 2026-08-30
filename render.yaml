@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: balltrend-api
+    runtime: docker
+    repo: https://github.com/YOUR_GITHUB_USERNAME/balltrend-api
+    branch: main
+    plan: free
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12
