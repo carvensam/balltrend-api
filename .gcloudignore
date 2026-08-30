@@ -1,0 +1,16 @@
+# Ignore files not needed in Cloud Run container
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.git/
+.gitignore
+*.md
+.vscode/
+.idea/
