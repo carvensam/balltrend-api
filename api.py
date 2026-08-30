@@ -6,12 +6,27 @@ Provides endpoints for match listing, batch prediction, and pattern viewing.
 import os
 import json
 import random
+import atexit
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from database import get_connection
+from predictor import predict_matches, batch_predict
+from auto_update import init_scheduler, shutdown_scheduler, check_and_update, get_update_status
+import json
+import random
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from database import get_connection
 from predictor import predict_matches, batch_predict
 
 app = Flask(__name__)
+CORS(app)  # Allow cross-origin from Android app
+
+API_VERSION = "v1"
+
+# Initialize auto-update scheduler
+init_scheduler()
+atexit.register(shutdown_scheduler)
 CORS(app)  # Allow cross-origin from Android app
 
 API_VERSION = "v1"
@@ -274,6 +289,23 @@ def simulate():
         'lower_accuracy': round(lower_acc * 100, 1),
         'results': results
     })
+
+
+@app.route(f'/api/{API_VERSION}/update-data', methods=['POST'])
+def trigger_update():
+    """Manually trigger data update. Runs in background thread."""
+    import threading
+    threading.Thread(target=check_and_update, daemon=True).start()
+    return jsonify({
+        'status': 'update_triggered',
+        'message': 'Data update started in background. Check /api/v1/update-status for progress.'
+    })
+
+
+@app.route(f'/api/{API_VERSION}/update-status', methods=['GET'])
+def update_status():
+    """Get current auto-update status."""
+    return jsonify(get_update_status())
 
 
 if __name__ == '__main__':
