@@ -73,8 +73,9 @@ def leagues():
 
 @app.route(f'/api/{API_VERSION}/matches', methods=['GET'])
 def matches():
-    """Get matches. Query params: league, limit, upcoming_only."""
+    """Get matches. Query params: league, date, limit, upcoming_only."""
     league = request.args.get('league')
+    date = request.args.get('date')
     limit = int(request.args.get('limit', 50))
     upcoming_only = request.args.get('upcoming_only', 'false').lower() == 'true'
 
@@ -94,6 +95,9 @@ def matches():
         if league:
             query += " AND m.league = ?"
             params.append(league)
+        if date:
+            query += " AND m.match_date = ?"
+            params.append(date)
         query += " ORDER BY m.match_date DESC, m.match_time DESC LIMIT ?"
         params.append(limit)
     else:
@@ -110,6 +114,9 @@ def matches():
         if league:
             query += " AND m.league = ?"
             params.append(league)
+        if date:
+            query += " AND m.match_date = ?"
+            params.append(date)
         query += " ORDER BY m.match_date DESC, m.match_time DESC LIMIT ?"
         params.append(limit)
 
