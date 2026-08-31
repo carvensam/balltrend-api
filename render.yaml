@@ -3,7 +3,7 @@ services:
     name: balltrend-api
     runtime: docker
     repo: https://github.com/carvensam/balltrend-api
-    branch: master
+    branch: main
     plan: free
     healthCheckPath: /api/v1/health
     envVars:
