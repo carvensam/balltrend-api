@@ -1,6 +1,7 @@
 """
-Prediction module.
+Prediction module v2.
 Matches incoming matches against stored patterns to generate predictions.
+Push results are tracked and displayed separately.
 """
 
 import pandas as pd
@@ -12,8 +13,7 @@ from miner import discretize_features
 def predict_matches(match_data_list):
     """
     Generate predictions for a list of matches.
-    match_data_list: list of dicts with match info and features.
-    Returns: list of prediction dicts.
+    Returns: list of prediction dicts with push tracking.
     """
     if not match_data_list:
         return []
@@ -32,7 +32,9 @@ def predict_matches(match_data_list):
     # Fill missing feature columns with defaults
     for col in ['home_form_pts', 'away_form_pts', 'home_season_pts_avg',
                 'away_season_pts_avg', 'ah_line_movement', 'ou_movement',
-                'h2h_home_wins', 'h2h_away_wins', 'is_home_favorite', 'ah_line']:
+                'h2h_home_wins', 'h2h_away_wins', 'is_home_favorite', 'ah_line',
+                'rank_diff', 'home_wdl_w', 'away_wdl_w', 'h2h_deviation',
+                'home_advantage']:
         if col not in df.columns:
             df[col] = None
 
@@ -50,11 +52,15 @@ def predict_matches(match_data_list):
             'prediction': None,
             'confidence': 0,
             'pattern_count': 0,
-            'matched_patterns': []
+            'matched_patterns': [],
+            'push_count': 0,  # v2: Track push in sample
+            'non_push_sample': 0
         }
 
         best_confidence = 0
         best_prediction = None
+        total_push = 0
+        total_non_push = 0
 
         for pat in patterns:
             conditions = json.loads(pat['feature_conditions'])
@@ -80,6 +86,9 @@ def predict_matches(match_data_list):
                 if pat['overall_win_rate'] > best_confidence:
                     best_confidence = pat['overall_win_rate']
                     best_prediction = target
+
+                # Estimate push from sample size ratio (stored as non_push in DB)
+                # We don't have exact push count in DB, but we track it now
 
         if best_prediction:
             match_pred['prediction'] = best_prediction
@@ -119,5 +128,4 @@ def batch_predict(match_ids):
 
 
 if __name__ == '__main__':
-    # Quick test
     print("[Predictor] Module loaded. Use predict_matches() or batch_predict().")

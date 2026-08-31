@@ -1,23 +1,19 @@
 """
 Flask REST API for the Soccer Odds Prediction System.
-Provides endpoints for match listing, batch prediction, and pattern viewing.
+Provides endpoints for match listing, batch prediction, pattern viewing,
+20-match simulation, and auto-update.
 """
 
 import os
 import json
 import random
 import atexit
+import threading
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from database import get_connection
 from predictor import predict_matches, batch_predict
 from auto_update import init_scheduler, shutdown_scheduler, check_and_update, get_update_status
-import json
-import random
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from database import get_connection
-from predictor import predict_matches, batch_predict
 
 app = Flask(__name__)
 CORS(app)  # Allow cross-origin from Android app
@@ -27,9 +23,6 @@ API_VERSION = "v1"
 # Initialize auto-update scheduler
 init_scheduler()
 atexit.register(shutdown_scheduler)
-CORS(app)  # Allow cross-origin from Android app
-
-API_VERSION = "v1"
 
 
 def get_db_matches(league=None, limit=50, has_result=None):
@@ -85,12 +78,9 @@ def matches():
     limit = int(request.args.get('limit', 50))
     upcoming_only = request.args.get('upcoming_only', 'false').lower() == 'true'
 
-    # For demo purposes, return recent historical matches as "today's matches"
-    # In production, this would query a real-time data source
     conn = get_connection()
 
     if upcoming_only:
-        # Return matches without results (simulating upcoming)
         query = """
             SELECT m.id, m.league, m.season, m.match_date, m.match_time,
                    m.home_team, m.away_team,
@@ -157,7 +147,7 @@ def predict():
 
     predictions = batch_predict(match_ids)
 
-    # Format for Android app
+    # Format for Android app (v2 with push tracking)
     formatted = []
     for p in predictions:
         pred_text = '無高勝率模式，建議觀望'
@@ -174,7 +164,8 @@ def predict():
             'prediction': p['prediction'],
             'prediction_text': pred_text,
             'confidence': p['confidence'],
-            'pattern_count': p['pattern_count']
+            'pattern_count': p['pattern_count'],
+            'push_count': p.get('push_count', 0)
         })
 
     return jsonify({'predictions': formatted})
@@ -216,14 +207,10 @@ def patterns():
 
 @app.route(f'/api/{API_VERSION}/simulate', methods=['GET'])
 def simulate():
-    """
-    Run a simulation on N random historical matches.
-    Returns predictions vs actual results.
-    """
+    """Run a simulation on N random historical matches."""
     n = int(request.args.get('n', 30))
     conn = get_connection()
 
-    # Get N random matches that have results
     rows = conn.execute("""
         SELECT m.id, m.league, m.home_team, m.away_team, m.match_date,
                f.ah_result, o.ah_line
@@ -238,19 +225,22 @@ def simulate():
     match_ids = [r['id'] for r in rows]
     predictions = batch_predict(match_ids)
 
-    # Evaluate
     correct = 0
     total_with_pred = 0
     upper_correct = 0
     upper_total = 0
     lower_correct = 0
     lower_total = 0
+    total_push = 0
 
     results = []
     for r, p in zip(rows, predictions):
         actual = r['ah_result']
         pred = p['prediction']
         is_correct = (pred == actual) if pred in ['upper_win', 'lower_win'] else False
+
+        if actual == 'push':
+            total_push += 1
 
         if pred in ['upper_win', 'lower_win']:
             total_with_pred += 1
@@ -287,6 +277,89 @@ def simulate():
         'upper_accuracy': round(upper_acc * 100, 1),
         'lower_predictions': lower_total,
         'lower_accuracy': round(lower_acc * 100, 1),
+        'push_count': total_push,
+        'results': results
+    })
+
+
+@app.route(f'/api/{API_VERSION}/simulate20', methods=['GET'])
+def simulate20():
+    """
+    Run a 20-match real-world simulation on the most recent completed matches.
+    This is the formal validation test.
+    """
+    conn = get_connection()
+
+    # Get 20 most recent matches that have results
+    rows = conn.execute("""
+        SELECT m.id, m.league, m.home_team, m.away_team, m.match_date,
+               f.ah_result, o.ah_line
+        FROM matches m
+        JOIN features f ON m.id = f.match_id
+        JOIN odds o ON m.id = o.match_id
+        WHERE m.ftr IS NOT NULL AND f.ah_result IS NOT NULL
+        ORDER BY m.match_date DESC, m.match_time DESC
+        LIMIT 20
+    """).fetchall()
+
+    match_ids = [r['id'] for r in rows]
+    predictions = batch_predict(match_ids)
+
+    correct = 0
+    total_with_pred = 0
+    upper_correct = 0
+    upper_total = 0
+    lower_correct = 0
+    lower_total = 0
+    total_push = 0
+
+    results = []
+    for r, p in zip(rows, predictions):
+        actual = r['ah_result']
+        pred = p['prediction']
+        is_correct = (pred == actual) if pred in ['upper_win', 'lower_win'] else False
+
+        if actual == 'push':
+            total_push += 1
+
+        if pred in ['upper_win', 'lower_win']:
+            total_with_pred += 1
+            if is_correct:
+                correct += 1
+            if pred == 'upper_win':
+                upper_total += 1
+                if is_correct: upper_correct += 1
+            elif pred == 'lower_win':
+                lower_total += 1
+                if is_correct: lower_correct += 1
+
+        results.append({
+            'match': f"{r['home_team']} vs {r['away_team']}",
+            'league': r['league'],
+            'date': r['match_date'],
+            'ah_line': r['ah_line'],
+            'prediction': pred,
+            'actual': actual,
+            'correct': is_correct
+        })
+
+    conn.close()
+
+    accuracy = correct / total_with_pred if total_with_pred > 0 else 0
+    upper_acc = upper_correct / upper_total if upper_total > 0 else 0
+    lower_acc = lower_correct / lower_total if lower_total > 0 else 0
+
+    return jsonify({
+        'test_name': '20場實盤模擬驗證',
+        'simulation_size': 20,
+        'matches_with_prediction': total_with_pred,
+        'overall_accuracy': round(accuracy * 100, 1),
+        'upper_predictions': upper_total,
+        'upper_accuracy': round(upper_acc * 100, 1),
+        'lower_predictions': lower_total,
+        'lower_accuracy': round(lower_acc * 100, 1),
+        'push_count': total_push,
+        'passed': accuracy >= 0.55,  # Threshold: 55%+
         'results': results
     })
 
@@ -294,7 +367,6 @@ def simulate():
 @app.route(f'/api/{API_VERSION}/update-data', methods=['POST'])
 def trigger_update():
     """Manually trigger data update. Runs in background thread."""
-    import threading
     threading.Thread(target=check_and_update, daemon=True).start()
     return jsonify({
         'status': 'update_triggered',
@@ -309,7 +381,6 @@ def update_status():
 
 
 if __name__ == '__main__':
-    # Run on all interfaces so phone can connect via local WiFi
     port = int(os.environ.get('PORT', 5000))
     print(f"[API] Starting server on 0.0.0.0:{port}")
     app.run(host='0.0.0.0', port=port, debug=False)

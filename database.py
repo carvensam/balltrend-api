@@ -57,13 +57,13 @@ def init_database():
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
-    -- Engineered features for pattern mining
+    -- Engineered features for pattern mining (v2)
     CREATE TABLE IF NOT EXISTS features (
         match_id INTEGER PRIMARY KEY REFERENCES matches(id),
         -- Form features (last 5 matches)
-        home_form_gf REAL,      -- goals for
-        home_form_ga REAL,      -- goals against
-        home_form_pts REAL,     -- points per game
+        home_form_gf REAL,
+        home_form_ga REAL,
+        home_form_pts REAL,
         away_form_gf REAL,
         away_form_ga REAL,
         away_form_pts REAL,
@@ -79,15 +79,31 @@ def init_database():
         h2h_draws INTEGER DEFAULT 0,
         h2h_away_wins INTEGER DEFAULT 0,
         -- Odds movement features
-        ah_line_movement REAL,       -- closing - opening
+        ah_line_movement REAL,
         ah_home_odds_movement REAL,
         ah_away_odds_movement REAL,
-        ou_25_opening_implied REAL,  -- implied probability from opening O/U odds
+        ou_25_opening_implied REAL,
         ou_25_closing_implied REAL,
         ou_movement REAL,
         -- Derived classification
-        is_home_favorite INTEGER,    -- 1 if home is AH favorite (ah_line <= 0)
-        ah_result TEXT               -- 'upper_win', 'lower_win', 'push'
+        is_home_favorite INTEGER,
+        ah_result TEXT,
+        -- v2: League rankings
+        home_rank INTEGER,
+        away_rank INTEGER,
+        rank_diff REAL,
+        -- v2: W/D/L ratios (last 5)
+        home_wdl_w REAL,
+        home_wdl_d REAL,
+        home_wdl_l REAL,
+        away_wdl_w REAL,
+        away_wdl_d REAL,
+        away_wdl_l REAL,
+        -- v2: H2H deviation
+        h2h_deviation INTEGER,
+        -- v2: Home/away advantage
+        home_advantage REAL,
+        away_advantage REAL
     );
 
     -- Discovered patterns with Walk-Forward validation
@@ -96,15 +112,15 @@ def init_database():
         league TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        feature_conditions TEXT,     -- JSON dict of conditions
-        target TEXT,                 -- 'upper_win', 'lower_win', 'upper_or_push'
+        feature_conditions TEXT,
+        target TEXT,
         train_win_rate REAL,
         train_sample_size INTEGER,
         val_win_rate REAL,
         val_sample_size INTEGER,
         overall_win_rate REAL,
         overall_sample_size INTEGER,
-        status TEXT DEFAULT 'active', -- active, degraded, rejected
+        status TEXT DEFAULT 'active',
         discovery_season TEXT,
         total_predictions INTEGER DEFAULT 0,
         total_correct INTEGER DEFAULT 0
@@ -116,7 +132,7 @@ def init_database():
         match_id INTEGER REFERENCES matches(id),
         pattern_id INTEGER REFERENCES patterns(id),
         predicted_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        prediction TEXT,            -- 'upper_win', 'lower_win', 'no_pattern'
+        prediction TEXT,
         confidence REAL,
         actual_result TEXT,
         is_correct INTEGER,

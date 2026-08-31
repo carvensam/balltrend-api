@@ -1,6 +1,10 @@
 """
-Pattern mining engine with Walk-Forward validation.
-Discovers feature combinations with high win rates for Asian Handicap outcomes.
+Pattern mining engine v2 with Walk-Forward validation.
+Fixes:
+- Sample threshold: train >= 50, val >= 25
+- Win rate threshold: train >= 60%, val >= 55%
+- Multi-window validation: pattern must appear in >= 3 independent windows
+- Push excluded from win rate calculation
 """
 
 import pandas as pd
@@ -65,19 +69,77 @@ def discretize_features(df):
         labels=['much_worse', 'worse', 'even', 'better', 'much_better']
     ).astype(str)
 
+    # v2: Discretize new features
+    # Rank diff: positive = home team ranked higher
+    ddf['rank_diff_bucket'] = 'unknown'
+    ddf.loc[ddf['rank_diff'] <= -5, 'rank_diff_bucket'] = 'away_much_higher'
+    ddf.loc[(ddf['rank_diff'] > -5) & (ddf['rank_diff'] < -1), 'rank_diff_bucket'] = 'away_higher'
+    ddf.loc[(ddf['rank_diff'] >= -1) & (ddf['rank_diff'] <= 1), 'rank_diff_bucket'] = 'rank_even'
+    ddf.loc[(ddf['rank_diff'] > 1) & (ddf['rank_diff'] < 5), 'rank_diff_bucket'] = 'home_higher'
+    ddf.loc[ddf['rank_diff'] >= 5, 'rank_diff_bucket'] = 'home_much_higher'
+
+    # WDL ratios
+    ddf['home_wdl_bucket'] = 'unknown'
+    if 'home_wdl_w' in ddf.columns:
+        ddf.loc[ddf['home_wdl_w'] >= 0.6, 'home_wdl_bucket'] = 'strong_win'
+        ddf.loc[(ddf['home_wdl_w'] >= 0.4) & (ddf['home_wdl_w'] < 0.6), 'home_wdl_bucket'] = 'moderate_win'
+        ddf.loc[(ddf['home_wdl_w'] >= 0.2) & (ddf['home_wdl_w'] < 0.4), 'home_wdl_bucket'] = 'mixed'
+        ddf.loc[ddf['home_wdl_w'] < 0.2, 'home_wdl_bucket'] = 'poor'
+
+    ddf['away_wdl_bucket'] = 'unknown'
+    if 'away_wdl_w' in ddf.columns:
+        ddf.loc[ddf['away_wdl_w'] >= 0.6, 'away_wdl_bucket'] = 'strong_win'
+        ddf.loc[(ddf['away_wdl_w'] >= 0.4) & (ddf['away_wdl_w'] < 0.6), 'away_wdl_bucket'] = 'moderate_win'
+        ddf.loc[(ddf['away_wdl_w'] >= 0.2) & (ddf['away_wdl_w'] < 0.4), 'away_wdl_bucket'] = 'mixed'
+        ddf.loc[ddf['away_wdl_w'] < 0.2, 'away_wdl_bucket'] = 'poor'
+
+    # H2H deviation
+    ddf['h2h_dev_bucket'] = ddf['h2h_deviation'].fillna(0).astype(int).astype(str)
+    ddf['h2h_dev_bucket'] = ddf['h2h_dev_bucket'].map({'-1': 'favors_lower', '0': 'neutral', '1': 'favors_upper'})
+
+    # Home advantage
+    ddf['home_adv_bucket'] = 'unknown'
+    if 'home_advantage' in ddf.columns:
+        ddf.loc[ddf['home_advantage'] >= 1.5, 'home_adv_bucket'] = 'strong_home'
+        ddf.loc[(ddf['home_advantage'] >= 1.0) & (ddf['home_advantage'] < 1.5), 'home_adv_bucket'] = 'moderate_home'
+        ddf.loc[(ddf['home_advantage'] >= 0.7) & (ddf['home_advantage'] < 1.0), 'home_adv_bucket'] = 'weak_home'
+        ddf.loc[ddf['home_advantage'] < 0.7, 'home_adv_bucket'] = 'no_home'
+
     return ddf
 
 
-def mine_patterns(train_df, val_df, min_train_samples=15, min_train_winrate=0.58,
-                  min_val_samples=10, min_val_winrate=0.55):
-    """Mine patterns from training data and validate on validation data."""
+def calc_win_rate(series, target):
+    """
+    Calculate win rate excluding pushes.
+    win_rate = (wins) / (total - pushes)
+    Also returns push_count.
+    """
+    non_push = series[series != 'push']
+    total_non_push = len(non_push)
+    if total_non_push == 0:
+        return 0.0, 0
+    wins = (non_push == target).sum()
+    push_count = (series == 'push').sum()
+    return wins / total_non_push, push_count
+
+
+def mine_patterns(train_df, val_df,
+                  min_train_samples=50, min_train_winrate=0.60,
+                  min_val_samples=25, min_val_winrate=0.55):
+    """
+    Mine patterns from training data and validate on validation data.
+    Push results are excluded from win rate calculation.
+    """
     train_d = discretize_features(train_df)
     val_d = discretize_features(val_df)
 
     feature_cols = [
         'league', 'ah_line_bucket', 'ah_movement_dir', 'is_home_favorite',
         'home_form_bucket', 'away_form_bucket', 'h2h_home_advantage',
-        'ou_movement_dir', 'season_pts_diff_bucket'
+        'ou_movement_dir', 'season_pts_diff_bucket',
+        # v2 features
+        'rank_diff_bucket', 'home_wdl_bucket', 'away_wdl_bucket',
+        'h2h_dev_bucket', 'home_adv_bucket'
     ]
     targets = ['upper_win', 'lower_win']
     mined = []
@@ -85,12 +147,12 @@ def mine_patterns(train_df, val_df, min_train_samples=15, min_train_winrate=0.58
     for r in [1, 2, 3]:
         for cols in combinations(feature_cols, r):
             for target in targets:
-                grouped = train_d.groupby(list(cols))
+                grouped = train_d.groupby(list(cols), observed=False)
                 for group_vals, group in grouped:
                     if len(group) < min_train_samples:
                         continue
 
-                    win_rate = (group['ah_result'] == target).mean()
+                    win_rate, push_count = calc_win_rate(group['ah_result'], target)
                     if win_rate < min_train_winrate:
                         continue
 
@@ -104,22 +166,26 @@ def mine_patterns(train_df, val_df, min_train_samples=15, min_train_winrate=0.58
                     if len(val_group) < min_val_samples:
                         continue
 
-                    val_win_rate = (val_group['ah_result'] == target).mean()
+                    val_win_rate, val_push_count = calc_win_rate(val_group['ah_result'], target)
                     if val_win_rate < min_val_winrate:
                         continue
 
+                    # Overall: exclude pushes
                     all_group = pd.concat([group, val_group])
-                    overall_wr = (all_group['ah_result'] == target).mean()
+                    overall_wr, overall_push = calc_win_rate(all_group['ah_result'], target)
 
                     mined.append({
                         'conditions': condition,
                         'target': target,
                         'train_win_rate': win_rate,
                         'train_samples': len(group),
+                        'train_push_count': push_count,
                         'val_win_rate': val_win_rate,
                         'val_samples': len(val_group),
+                        'val_push_count': val_push_count,
                         'overall_win_rate': overall_wr,
                         'overall_samples': len(all_group),
+                        'overall_push_count': overall_push,
                     })
 
     # De-duplicate (keep best overall win rate)
@@ -132,8 +198,12 @@ def mine_patterns(train_df, val_df, min_train_samples=15, min_train_winrate=0.58
     return list(seen.values())
 
 
-def run_walkforward_mining(window_size=300, val_size=100, step=500):
-    """Run Walk-Forward pattern mining across all historical data."""
+def run_walkforward_mining(window_size=300, val_size=150, step=150,
+                           min_window_count=3):
+    """
+    Run Walk-Forward pattern mining across all historical data.
+    Patterns must appear in at least min_window_count independent windows.
+    """
     conn = get_connection()
 
     df = pd.read_sql_query("""
@@ -166,35 +236,41 @@ def run_walkforward_mining(window_size=300, val_size=100, step=500):
         for p in patterns:
             p['discovery_window'] = season_label
             p['league'] = p['conditions'].get('league', 'ALL')
+            p['window_index'] = windows + 1
 
         all_patterns.extend(patterns)
         windows += 1
 
     print(f"[Miner] Mined {len(all_patterns)} raw patterns across {windows} windows.")
 
-    # De-duplicate across windows and store
-    seen = {}
+    # Multi-window validation: pattern must appear in >= min_window_count windows
+    # Group by condition+target and count unique windows
+    pattern_windows = defaultdict(set)
+    pattern_best = {}
+
     for p in all_patterns:
         key = json.dumps(p['conditions'], sort_keys=True) + '::' + p['target']
-        if key not in seen:
-            seen[key] = p
-        else:
-            existing = seen[key]
-            total = existing['overall_samples'] + p['overall_samples']
-            existing['overall_win_rate'] = (
-                (existing['overall_win_rate'] * existing['overall_samples'] +
-                 p['overall_win_rate'] * p['overall_samples']) / total
-            )
-            existing['overall_samples'] = total
-            existing['train_samples'] += p['train_samples']
-            existing['val_samples'] += p['val_samples']
+        pattern_windows[key].add(p['window_index'])
 
-    unique_patterns = list(seen.values())
-    print(f"[Miner] {len(unique_patterns)} unique patterns after de-duplication.")
+        if key not in pattern_best or p['overall_win_rate'] > pattern_best[key]['overall_win_rate']:
+            pattern_best[key] = p
 
+    # Filter: require >= min_window_count independent windows
+    validated_patterns = []
+    for key, window_set in pattern_windows.items():
+        if len(window_set) >= min_window_count:
+            p = pattern_best[key]
+            p['validation_windows'] = len(window_set)
+            p['total_windows'] = windows
+            validated_patterns.append(p)
+
+    print(f"[Miner] {len(validated_patterns)} patterns passed multi-window validation (>= {min_window_count} windows).")
+    print(f"[Miner] {len(pattern_windows) - len(validated_patterns)} patterns rejected (insufficient windows).")
+
+    # Store in database
     cursor = conn.cursor()
     stored = 0
-    for p in unique_patterns:
+    for p in validated_patterns:
         cursor.execute("""
             INSERT OR REPLACE INTO patterns
             (league, feature_conditions, target,
@@ -214,18 +290,18 @@ def run_walkforward_mining(window_size=300, val_size=100, step=500):
             p['overall_win_rate'],
             p['overall_samples'],
             'active',
-            p['discovery_window']
+            f"{p['discovery_window']} (validated in {p['validation_windows']}/{p['total_windows']} windows)"
         ))
         stored += 1
 
     conn.commit()
     conn.close()
-    print(f"[Miner] Stored {stored} patterns in database.")
-    return unique_patterns
+    print(f"[Miner] Stored {stored} validated patterns in database.")
+    return validated_patterns
 
 
 def update_pattern_performance():
-    """Backfill pattern performance with actual results."""
+    """Backfill pattern performance with actual results (push excluded)."""
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -256,17 +332,16 @@ def update_pattern_performance():
         if len(matched) == 0:
             continue
 
-        correct = (matched['ah_result'] == target).sum()
-        total = len(matched)
-        wr = correct / total if total > 0 else 0
+        wr, push_count = calc_win_rate(matched['ah_result'], target)
+        total_non_push = len(matched[matched['ah_result'] != 'push'])
 
         cursor.execute("""
             UPDATE patterns
             SET overall_win_rate=?, overall_sample_size=?, updated_at=CURRENT_TIMESTAMP
             WHERE id=?
-        """, (wr, total, pat_id))
+        """, (wr, total_non_push, pat_id))
 
-        if wr < 0.65 and total >= 30:
+        if wr < 0.60 and total_non_push >= 50:
             cursor.execute("UPDATE patterns SET status='degraded' WHERE id=?", (pat_id,))
 
     conn.commit()
@@ -275,4 +350,4 @@ def update_pattern_performance():
 
 
 if __name__ == '__main__':
-    patterns = run_walkforward_mining(window_size=300, val_size=100, step=500)
+    patterns = run_walkforward_mining(window_size=300, val_size=150, step=150)
