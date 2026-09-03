@@ -9,11 +9,13 @@ import json
 import random
 import atexit
 import threading
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from database import get_connection
 from predictor import predict_matches, batch_predict
 from auto_update import init_scheduler, shutdown_scheduler, check_and_update, get_update_status
+from fixtures import get_all_matches_for_date, get_matches_for_date, translate_league
 
 app = Flask(__name__)
 CORS(app)  # Allow cross-origin from Android app
@@ -23,6 +25,17 @@ API_VERSION = "v1"
 # Initialize auto-update scheduler
 init_scheduler()
 atexit.register(shutdown_scheduler)
+
+
+def hk_to_europe_date(hk_date_str):
+    """
+    Convert Hong Kong date to Europe match date.
+    Hong Kong is UTC+8, Europe (CEST) is UTC+2 in summer, UTC+1 in winter.
+    DB stores European LOCAL match dates, so we return as-is for queries.
+    European evening kickoffs (e.g. 20:00 CEST) = Hong Kong 02:00 next day.
+    But the match_date field is the calendar date in Europe.
+    """
+    return hk_date_str
 
 
 def get_db_matches(league=None, limit=50, has_result=None):
@@ -79,9 +92,27 @@ def matches():
     limit = int(request.args.get('limit', 50))
     upcoming_only = request.args.get('upcoming_only', 'false').lower() == 'true'
 
+    # If date is provided, use fixtures module to get matches for that date
+    # This supports both historical (DB) and future (external API) dates
+    if date:
+        europe_date = hk_to_europe_date(date)
+        if league:
+            matches_list = get_matches_for_date(league, europe_date)
+        else:
+            matches_list = get_all_matches_for_date(europe_date)
+        return jsonify({
+            'matches': matches_list,
+            'date_queried': date,
+            'europe_date': europe_date,
+            'data_source_note': 'Historical data from Football-Data; future fixtures require football-data.org API key (FD_API_KEY)'
+        })
+
     conn = get_connection()
 
     if upcoming_only:
+        # Show matches from the last 3 days with no result (covers delayed updates)
+        # Also include daily_matches cache for fixtures fetched from external APIs
+        week_ago = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
         query = """
             SELECT m.id, m.league, m.season, m.match_date, m.match_time,
                    m.home_team, m.away_team,
@@ -89,15 +120,12 @@ def matches():
                    o.b365_over25, o.b365_under25
             FROM matches m
             JOIN odds o ON m.id = o.match_id
-            WHERE m.ftr IS NULL
+            WHERE m.ftr IS NULL AND m.match_date >= ?
         """
-        params = []
+        params = [week_ago]
         if league:
             query += " AND m.league = ?"
             params.append(league)
-        if date:
-            query += " AND m.match_date = ?"
-            params.append(date)
         query += " ORDER BY m.match_date DESC, m.match_time DESC LIMIT ?"
         params.append(limit)
     else:
@@ -114,9 +142,6 @@ def matches():
         if league:
             query += " AND m.league = ?"
             params.append(league)
-        if date:
-            query += " AND m.match_date = ?"
-            params.append(date)
         query += " ORDER BY m.match_date DESC, m.match_time DESC LIMIT ?"
         params.append(limit)
 
@@ -128,14 +153,16 @@ def matches():
         result.append({
             'id': r['id'],
             'league': r['league'],
+            'league_name': translate_league(r['league']),
             'season': r['season'],
             'match_date': r['match_date'],
-            'match_time': r['match_time'],
+            'match_time': r['match_time'] or '',
             'home_team': r['home_team'],
             'away_team': r['away_team'],
             'ah_line': r['ah_line'],
             'ah_home_odds': r['ah_home_odds'],
-            'ah_away_odds': r['ah_away_odds']
+            'ah_away_odds': r['ah_away_odds'],
+            'source': 'database'
         })
 
     return jsonify({'matches': result})
@@ -166,6 +193,7 @@ def predict():
         formatted.append({
             'match_id': p['match_id'],
             'league': p['league'],
+            'league_name': translate_league(p['league']),
             'match_display': f"{p['home_team']} vs {p['away_team']}",
             'home_team': p['home_team'],
             'away_team': p['away_team'],
@@ -201,6 +229,7 @@ def patterns():
         result.append({
             'id': r['id'],
             'league': r['league'],
+            'league_name': translate_league(r['league']),
             'conditions': json.loads(r['feature_conditions']),
             'target': r['target'],
             'train_win_rate': r['train_win_rate'],
@@ -265,6 +294,7 @@ def simulate():
         results.append({
             'match': f"{r['home_team']} vs {r['away_team']}",
             'league': r['league'],
+            'league_name': translate_league(r['league']),
             'date': r['match_date'],
             'ah_line': r['ah_line'],
             'prediction': pred,
@@ -345,6 +375,7 @@ def simulate20():
         results.append({
             'match': f"{r['home_team']} vs {r['away_team']}",
             'league': r['league'],
+            'league_name': translate_league(r['league']),
             'date': r['match_date'],
             'ah_line': r['ah_line'],
             'prediction': pred,
