@@ -420,6 +420,29 @@ def update_status():
     return jsonify(get_update_status())
 
 
+@app.route(f'/api/{API_VERSION}/cron-update', methods=['POST'])
+def cron_update():
+    """
+    Cloud cron endpoint for automated daily updates.
+    Called by external cron service to wake up Render and trigger data update.
+    Protected by CRON_SECRET.
+    """
+    secret = request.headers.get('X-Cron-Secret', '') or request.args.get('secret', '')
+    expected = os.environ.get('CRON_SECRET', '')
+    
+    if not expected:
+        return jsonify({'status': 'error', 'message': 'CRON_SECRET not configured'}), 403
+    if secret != expected:
+        return jsonify({'status': 'error', 'message': 'Invalid secret'}), 403
+    
+    threading.Thread(target=check_and_update, daemon=True).start()
+    return jsonify({
+        'status': 'ok',
+        'message': 'Daily update triggered via cron',
+        'triggered_at': datetime.now().isoformat()
+    })
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     print(f"[API] Starting server on 0.0.0.0:{port}")

@@ -1,11 +1,13 @@
 services:
   - type: web
     name: balltrend-api
-    runtime: docker
-    repo: https://github.com/carvensam/balltrend-api
-    branch: main
+    runtime: python
     plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python api.py
     healthCheckPath: /api/v1/health
     envVars:
       - key: PYTHON_VERSION
         value: 3.12
+      - key: CRON_SECRET
+        value: balltrend-2026-secret-key
