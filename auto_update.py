@@ -26,8 +26,11 @@ DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'soccer_patterns.db')
 
 # Track last update time
 _last_update_time = None
+_last_odds_fetch = None
 _update_lock = threading.Lock()
 _is_updating = False
+
+ODDS_FETCH_COOLDOWN_MINUTES = 30
 
 
 def get_latest_season_from_db():
@@ -92,6 +95,13 @@ def run_update_pipeline():
         
         print("[AutoUpdate] Mining patterns...")
         run_walkforward_mining(window_size=300, val_size=150, step=150)
+
+        print("[AutoUpdate] Fetching live odds...")
+        try:
+            odds_matches = fetch_live_odds()
+            print(f"[AutoUpdate] Fetched odds for {len(odds_matches)} matches")
+        except Exception as e:
+            print(f"[AutoUpdate] Odds fetch failed (non-fatal): {e}")
         
         # Verify
         conn = sqlite3.connect(DB_PATH)
@@ -112,6 +122,19 @@ def run_update_pipeline():
     finally:
         with _update_lock:
             _is_updating = False
+
+
+def fetch_live_odds():
+    """Fetch live odds with a cooldown to protect API quota."""
+    global _last_odds_fetch
+    now = datetime.now()
+    if _last_odds_fetch and (now - _last_odds_fetch).total_seconds() < ODDS_FETCH_COOLDOWN_MINUTES * 60:
+        print(f"[AutoUpdate] Odds fetch skipped (cooldown, last: {_last_odds_fetch.strftime('%H:%M:%S')})")
+        return []
+    from odds_fetcher import fetch_all_odds
+    matches = fetch_all_odds()
+    _last_odds_fetch = now
+    return matches
 
 
 def check_and_update():
@@ -152,7 +175,12 @@ def check_and_update():
         print(f"[AutoUpdate] New/updated files: {downloaded}")
         run_update_pipeline()
     else:
-        print("[AutoUpdate] No new data available.")
+        print("[AutoUpdate] No new CSV data available. Refreshing live odds only...")
+        try:
+            odds_matches = fetch_live_odds()
+            print(f"[AutoUpdate] Refreshed odds for {len(odds_matches)} matches")
+        except Exception as e:
+            print(f"[AutoUpdate] Odds refresh failed (non-fatal): {e}")
         global _last_update_time
         _last_update_time = datetime.now()
 

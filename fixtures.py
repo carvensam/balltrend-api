@@ -202,6 +202,7 @@ def get_matches_for_date(league_code, target_date):
     """, (league_code, target_date)).fetchall()
 
     db_matches = []
+    from odds_fetcher import db_team_to_zh
     for r in rows:
         db_matches.append({
             'id': r['id'],
@@ -209,8 +210,8 @@ def get_matches_for_date(league_code, target_date):
             'league_name': translate_league(r['league']),
             'match_date': r['match_date'],
             'match_time': r['match_time'] or '',
-            'home_team': r['home_team'],
-            'away_team': r['away_team'],
+            'home_team': db_team_to_zh(r['home_team']),
+            'away_team': db_team_to_zh(r['away_team']),
             'ah_line': r['ah_line'],
             'ah_home_odds': r['ah_home_odds'],
             'ah_away_odds': r['ah_away_odds'],

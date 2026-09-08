@@ -16,6 +16,7 @@ from database import get_connection
 from predictor import predict_matches, batch_predict
 from auto_update import init_scheduler, shutdown_scheduler, check_and_update, get_update_status
 from fixtures import get_all_matches_for_date, get_matches_for_date, translate_league
+from odds_fetcher import db_team_to_zh
 
 app = Flask(__name__)
 CORS(app)  # Allow cross-origin from Android app
@@ -96,6 +97,23 @@ def matches():
     # This supports both historical (DB) and future (external API) dates
     if date:
         europe_date = hk_to_europe_date(date)
+
+        # Priority 1: live odds from The Odds API (real Asian handicap lines)
+        try:
+            from odds_fetcher import get_live_odds_for_date
+            live_matches = get_live_odds_for_date(europe_date, league=league)
+        except Exception:
+            live_matches = []
+
+        if live_matches:
+            return jsonify({
+                'matches': live_matches,
+                'date_queried': date,
+                'europe_date': europe_date,
+                'data_source_note': 'Live odds from The Odds API (Bet365/Pinnacle)'
+            })
+
+        # Priority 2: fixtures from football-data.org (no odds available)
         if league:
             matches_list = get_matches_for_date(league, europe_date)
         else:
@@ -157,8 +175,8 @@ def matches():
             'season': r['season'],
             'match_date': r['match_date'],
             'match_time': r['match_time'] or '',
-            'home_team': r['home_team'],
-            'away_team': r['away_team'],
+            'home_team': db_team_to_zh(r['home_team']),
+            'away_team': db_team_to_zh(r['away_team']),
             'ah_line': r['ah_line'],
             'ah_home_odds': r['ah_home_odds'],
             'ah_away_odds': r['ah_away_odds'],
@@ -190,13 +208,16 @@ def predict():
         elif p['prediction'] == 'lower_win':
             pred_text = f'預測下盤勝，歷史勝率 {p["confidence"]}%'
 
+        home_zh = p['home_team'] if str(p['match_id']).startswith('live_') else db_team_to_zh(p['home_team'])
+        away_zh = p['away_team'] if str(p['match_id']).startswith('live_') else db_team_to_zh(p['away_team'])
+
         formatted.append({
             'match_id': p['match_id'],
             'league': p['league'],
             'league_name': translate_league(p['league']),
-            'match_display': f"{p['home_team']} vs {p['away_team']}",
-            'home_team': p['home_team'],
-            'away_team': p['away_team'],
+            'match_display': f"{home_zh} vs {away_zh}",
+            'home_team': home_zh,
+            'away_team': away_zh,
             'ah_line': p['ah_line'],
             'prediction': p['prediction'],
             'prediction_text': pred_text,
@@ -292,7 +313,7 @@ def simulate():
                 if is_correct: lower_correct += 1
 
         results.append({
-            'match': f"{r['home_team']} vs {r['away_team']}",
+            'match': f"{db_team_to_zh(r['home_team'])} vs {db_team_to_zh(r['away_team'])}",
             'league': r['league'],
             'league_name': translate_league(r['league']),
             'date': r['match_date'],
@@ -373,7 +394,7 @@ def simulate20():
                 if is_correct: lower_correct += 1
 
         results.append({
-            'match': f"{r['home_team']} vs {r['away_team']}",
+            'match': f"{db_team_to_zh(r['home_team'])} vs {db_team_to_zh(r['away_team'])}",
             'league': r['league'],
             'league_name': translate_league(r['league']),
             'date': r['match_date'],
