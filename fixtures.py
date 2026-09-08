@@ -15,12 +15,11 @@ from database import get_connection
 FD_API_KEY = os.environ.get('FD_API_KEY', '')
 FD_BASE_URL = 'https://api.football-data.org/v4'
 
-# League ID mappings for football-data.org
+# League ID mappings for football-data.org (free tier only)
 FD_LEAGUE_IDS = {
     'Ligue_1': 2015,      # France Ligue 1
-    'Ligue_2': 2016,      # France Ligue 2
     'La_Liga': 2014,      # Spain La Liga
-    'La_Liga_2': 2072,    # Spain Segunda Division
+    # Ligue_2 and La_Liga_2 not available on free tier of football-data.org
 }
 
 # League name mappings (English -> Traditional Chinese)
@@ -31,38 +30,42 @@ LEAGUE_NAMES_ZH = {
     'La_Liga_2': '西班牙乙組聯賽',
 }
 
-# Team name mappings (English -> Traditional Chinese)
-# This is a minimal set; expand as needed
+# Team name mappings (English official name -> Traditional Chinese)
+# Based on actual names returned by football-data.org API
 TEAM_NAMES_ZH = {
-    # Ligue 1
+    # === Ligue 1 (France) ===
     'Paris Saint-Germain FC': '巴黎聖日耳門',
     'Olympique de Marseille': '馬賽',
     'Olympique Lyonnais': '里昂',
     'AS Monaco FC': '摩納哥',
     'Lille OSC': '里爾',
+    'Stade Rennais FC 1901': '雷恩',
     'Stade Rennais FC': '雷恩',
     'OGC Nice': '尼斯',
+    'Racing Club de Lens': '朗斯',
     'RC Lens': '朗斯',
-    'Montpellier HSC': '蒙彼利埃',
     'RC Strasbourg Alsace': '斯特拉斯堡',
-    'FC Nantes': '南特',
-    'Stade de Reims': '蘭斯',
     'Toulouse FC': '圖盧茲',
     'FC Lorient': '羅連安特',
     'Le Havre AC': '勒阿弗爾',
     'Stade Brestois 29': '比斯特',
     'Angers SCO': '昂熱',
     'AJ Auxerre': '歐塞爾',
-    'AS Saint-\u00c9tienne': '聖伊天',
     'Le Mans FC': '勒芒',
     'Paris FC': '巴黎足球會',
+    'ES Troyes AC': '特魯瓦',
     'ESTAC Troyes': '特魯瓦',
+    'Montpellier HSC': '蒙彼利埃',
+    'FC Nantes': '南特',
+    'Stade de Reims': '蘭斯',
+    'AS Saint-\u00c9tienne': '聖伊天',
     'SC Bastia': '巴斯蒂亞',
     'Red Star FC': '紅星',
     'Dijon FCO': '迪安',
-    # La Liga
+    # === La Liga (Spain) ===
     'Real Madrid CF': '皇家馬德里',
     'FC Barcelona': '巴塞隆拿',
+    'Club Atl\u00e9tico de Madrid': '馬德里體育會',
     'Atl\u00e9tico de Madrid': '馬德里體育會',
     'Sevilla FC': '西維爾',
     'Real Betis Balompi\u00e9': '貝迪斯',
@@ -81,32 +84,33 @@ TEAM_NAMES_ZH = {
     'RCD Mallorca': '馬略卡',
     'UD Las Palmas': '拉斯彭馬斯',
     'Real Valladolid CF': '華拉度列',
-    # La Liga 2
+    'Elche CF': '艾爾切',
+    'Levante UD': '利雲特',
     'M\u00e1laga CF': '馬拉加',
+    'Real Racing Club de Santander': '桑坦德競賽',
+    'Racing de Santander': '桑坦德競賽',
+    'RC Deportivo La Coru\u00f1a': '拉科魯尼亞',
+    'Deportivo La Coruna': '拉科魯尼亞',
     'Real Zaragoza CF': '薩拉戈薩',
     'Real Oviedo': '奧維耶多',
     'CD Tenerife': '特內里費',
     'SD Eibar': '伊巴',
     'Real Sporting de Gij\u00f3n': '希杭',
-    'Levante UD': '利雲特',
     'CD Mirand\u00e9s': '米蘭迪斯',
     'FC Cartagena': '卡塔赫納',
     'Burgos CF': '布爾戈斯',
     'AD Alcorc\u00f3n': '阿爾科爾孔',
-    'Racing de Santander': '桑坦德競賽',
-    'Elche CF': '艾爾切',
     'C\u00f3rdoba CF': '科爾多瓦',
     'CD Eldense': '埃爾登斯',
     'SD Huesca': '侯爾斯卡',
     'CD Castell\u00f3n': '卡斯特利翁',
-    'Deportivo La Coruna': '拉科魯尼亞',
-    'Granada CF': '格蘭納達',
     'C\u00e1diz CF': '卡迪斯',
     'CE Sabadell FC': '薩巴德爾',
     'UD Almer\u00eda': '艾美利亞',
     'CD Numancia de Soria': '紐文西亞',
     'Celta de Vigo B': '切爾達B隊',
     'Real Sociedad B': '皇家蘇斯達B隊',
+    'Granada CF': '格蘭納達',
 }
 
 
@@ -160,6 +164,7 @@ def fetch_fixtures_from_fd(league_code, date_from=None, date_to=None):
 
             matches.append({
                 'league': league_code,
+                'league_name': translate_league(league_code),
                 'match_date': match_date,
                 'match_time': match_time,
                 'home_team': translate_team(home_team),
