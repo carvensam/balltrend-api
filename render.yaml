@@ -3,7 +3,7 @@ services:
     name: balltrend-api
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install flask flask-cors pandas numpy requests gunicorn apscheduler
     startCommand: python api.py
     healthCheckPath: /api/v1/health
     envVars:
