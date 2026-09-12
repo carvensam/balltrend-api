@@ -225,7 +225,12 @@ def get_home_away_advantage(team_records, team, match_dt, league, season, is_hom
 
 
 def compute_all_features():
-    """Compute and store features for all matches in the database."""
+    """
+    Compute and store features for all matches (O(n) incremental version).
+    - Processes league by league in date order with running standings
+      (identical semantics to the old per-match standings rebuild, but linear).
+    - Skips matches that already have features rows (fast daily updates).
+    """
     conn = get_connection()
 
     df = pd.read_sql_query("""
@@ -241,16 +246,17 @@ def compute_all_features():
 
     print(f"[Features] Loaded {len(df)} matches for feature engineering.")
 
-    # Calculate AH result
     df['ah_result'] = df.apply(
         lambda r: calculate_ah_result(r['fthg'], r['ftag'], r['ah_line']), axis=1
     )
     df['is_home_favorite'] = (df['ah_line'] <= 0).astype(int)
-
-    # Pre-build team match histories
     df['match_dt'] = pd.to_datetime(df['match_date'])
 
-    # Team records: key -> list of (date, is_home, gf, ga, pts)
+    # Skip matches that already have features
+    existing = set(r[0] for r in conn.execute("SELECT match_id FROM features").fetchall())
+    print(f"[Features] {len(existing)} matches already have features (will be skipped).")
+
+    # Team records: key -> list of (date, is_home, gf, ga, pts) — only completed matches
     team_records = {}
     for _, row in df.iterrows():
         if pd.isna(row['ftr']):
@@ -258,216 +264,224 @@ def compute_all_features():
         date = row['match_dt']
         league = row['league']
         season = row['season']
-
-        # Home team
-        home_key = (row['home_team'], league, season)
-        if home_key not in team_records:
-            team_records[home_key] = []
         home_pts = 3 if row['ftr'] == 'H' else (1 if row['ftr'] == 'D' else 0)
-        team_records[home_key].append((date, True, int(row['fthg'] or 0), int(row['ftag'] or 0), home_pts))
-
-        # Away team
-        away_key = (row['away_team'], league, season)
-        if away_key not in team_records:
-            team_records[away_key] = []
         away_pts = 3 if row['ftr'] == 'A' else (1 if row['ftr'] == 'D' else 0)
-        team_records[away_key].append((date, False, int(row['ftag'] or 0), int(row['fthg'] or 0), away_pts))
-
-    # Sort each team's records by date
+        team_records.setdefault((row['home_team'], league, season), []).append(
+            (date, True, int(row['fthg'] or 0), int(row['ftag'] or 0), home_pts))
+        team_records.setdefault((row['away_team'], league, season), []).append(
+            (date, False, int(row['ftag'] or 0), int(row['fthg'] or 0), away_pts))
     for key in team_records:
         team_records[key].sort(key=lambda x: x[0])
 
-    # H2H records: key -> list of (date, ftr)
     h2h_records = {}
     for _, row in df.iterrows():
         if pd.isna(row['ftr']):
             continue
-        h2h_key = (row['home_team'], row['away_team'])
-        if h2h_key not in h2h_records:
-            h2h_records[h2h_key] = []
-        h2h_records[h2h_key].append((row['match_dt'], row['ftr']))
-
+        h2h_records.setdefault((row['home_team'], row['away_team']), []).append(
+            (row['match_dt'], row['ftr']))
     for key in h2h_records:
         h2h_records[key].sort(key=lambda x: x[0])
 
-    # Process each match
     cursor = conn.cursor()
     processed = 0
+    skipped = 0
 
-    for idx, row in df.iterrows():
-        match_id = row['id']
-        league = row['league']
-        season = row['season']
-        match_dt = row['match_dt']
-        home_team = row['home_team']
-        away_team = row['away_team']
+    for league, ldf in df.groupby('league'):
+        standings = {}  # team -> stats; reset on season change
+        current_season = None
+        ldf = ldf.sort_values(['match_dt', 'match_time', 'id'])
+        for match_dt, ddf in ldf.groupby('match_dt', sort=True):
+            season0 = ddf['season'].iloc[0]
+            if season0 != current_season:
+                standings = {}
+                current_season = season0
+            for idx, row in ddf.iterrows():
+                match_id = row['id']
+                season = row['season']
+                home_team = row['home_team']
+                away_team = row['away_team']
 
-        # --- Basic features (existing) ---
+                home_key = (home_team, league, season)
+                home_form = None
+                if home_key in team_records:
+                    prev = [r for r in team_records[home_key] if r[0] < match_dt][-5:]
+                    if prev:
+                        games = len(prev)
+                        home_form = (sum(r[2] for r in prev) / games,
+                                     sum(r[3] for r in prev) / games,
+                                     sum(r[4] for r in prev) / games)
 
-        # Form (last 5)
-        home_key = (home_team, league, season)
-        home_form = None
-        if home_key in team_records:
-            prev = [r for r in team_records[home_key] if r[0] < match_dt][-5:]
-            if prev:
-                games = len(prev)
-                gf = sum(r[2] for r in prev)
-                ga = sum(r[3] for r in prev)
-                pts = sum(r[4] for r in prev)
-                home_form = (gf / games, ga / games, pts / games)
+                away_key = (away_team, league, season)
+                away_form = None
+                if away_key in team_records:
+                    prev = [r for r in team_records[away_key] if r[0] < match_dt][-5:]
+                    if prev:
+                        games = len(prev)
+                        away_form = (sum(r[2] for r in prev) / games,
+                                     sum(r[3] for r in prev) / games,
+                                     sum(r[4] for r in prev) / games)
 
-        away_key = (away_team, league, season)
-        away_form = None
-        if away_key in team_records:
-            prev = [r for r in team_records[away_key] if r[0] < match_dt][-5:]
-            if prev:
-                games = len(prev)
-                gf = sum(r[2] for r in prev)
-                ga = sum(r[3] for r in prev)
-                pts = sum(r[4] for r in prev)
-                away_form = (gf / games, ga / games, pts / games)
+                home_season = None
+                if home_key in team_records:
+                    prev = [r for r in team_records[home_key] if r[0] < match_dt]
+                    if prev:
+                        games = len(prev)
+                        home_season = (sum(r[2] for r in prev) / games,
+                                       sum(r[3] for r in prev) / games,
+                                       sum(r[4] for r in prev) / games)
 
-        # Season stats
-        home_season = None
-        if home_key in team_records:
-            prev = [r for r in team_records[home_key] if r[0] < match_dt]
-            if prev:
-                games = len(prev)
-                gf = sum(r[2] for r in prev)
-                ga = sum(r[3] for r in prev)
-                pts = sum(r[4] for r in prev)
-                home_season = (gf / games, ga / games, pts / games)
+                away_season = None
+                if away_key in team_records:
+                    prev = [r for r in team_records[away_key] if r[0] < match_dt]
+                    if prev:
+                        games = len(prev)
+                        away_season = (sum(r[2] for r in prev) / games,
+                                       sum(r[3] for r in prev) / games,
+                                       sum(r[4] for r in prev) / games)
 
-        away_season = None
-        if away_key in team_records:
-            prev = [r for r in team_records[away_key] if r[0] < match_dt]
-            if prev:
-                games = len(prev)
-                gf = sum(r[2] for r in prev)
-                ga = sum(r[3] for r in prev)
-                pts = sum(r[4] for r in prev)
-                away_season = (gf / games, ga / games, pts / games)
+                h2h_key = (home_team, away_team)
+                h2h = (0, 0, 0)
+                if h2h_key in h2h_records:
+                    prev = [r for r in h2h_records[h2h_key] if r[0] < match_dt][-3:]
+                    hw = sum(1 for r in prev if r[1] == 'H')
+                    hd = sum(1 for r in prev if r[1] == 'D')
+                    ha = sum(1 for r in prev if r[1] == 'A')
+                    h2h = (hw, hd, ha)
 
-        # H2H (last 3)
-        h2h_key = (home_team, away_team)
-        h2h = (0, 0, 0)
-        if h2h_key in h2h_records:
-            prev = [r for r in h2h_records[h2h_key] if r[0] < match_dt][-3:]
-            hw = sum(1 for r in prev if r[1] == 'H')
-            hd = sum(1 for r in prev if r[1] == 'D')
-            ha = sum(1 for r in prev if r[1] == 'A')
-            h2h = (hw, hd, ha)
+                ah_line_movement = None
+                ah_home_odds_movement = None
+                ah_away_odds_movement = None
+                ou_movement = None
 
-        # Odds movement
-        ah_line_movement = None
-        ah_home_odds_movement = None
-        ah_away_odds_movement = None
-        ou_movement = None
+                if pd.notna(row.get('ah_closing_line')) and pd.notna(row.get('ah_line')):
+                    ah_line_movement = float(row['ah_closing_line']) - float(row['ah_line'])
+                if pd.notna(row.get('ah_closing_home_odds')) and pd.notna(row.get('ah_home_odds')):
+                    ah_home_odds_movement = float(row['ah_closing_home_odds']) - float(row['ah_home_odds'])
+                if pd.notna(row.get('ah_closing_away_odds')) and pd.notna(row.get('ah_away_odds')):
+                    ah_away_odds_movement = float(row['ah_closing_away_odds']) - float(row['ah_away_odds'])
 
-        if pd.notna(row.get('ah_closing_line')) and pd.notna(row.get('ah_line')):
-            ah_line_movement = float(row['ah_closing_line']) - float(row['ah_line'])
-        if pd.notna(row.get('ah_closing_home_odds')) and pd.notna(row.get('ah_home_odds')):
-            ah_home_odds_movement = float(row['ah_closing_home_odds']) - float(row['ah_home_odds'])
-        if pd.notna(row.get('ah_closing_away_odds')) and pd.notna(row.get('ah_away_odds')):
-            ah_away_odds_movement = float(row['ah_closing_away_odds']) - float(row['ah_away_odds'])
+                ou_open_imp = None
+                ou_close_imp = None
+                if pd.notna(row.get('b365_over25')) and pd.notna(row.get('b365_under25')):
+                    try:
+                        ou_open_imp = 1 / float(row['b365_over25'])
+                    except Exception:
+                        pass
+                if pd.notna(row.get('b365c_over25')) and pd.notna(row.get('b365c_under25')):
+                    try:
+                        ou_close_imp = 1 / float(row['b365c_over25'])
+                    except Exception:
+                        pass
+                if ou_open_imp and ou_close_imp:
+                    ou_movement = ou_close_imp - ou_open_imp
 
-        ou_open_imp = None
-        ou_close_imp = None
-        if pd.notna(row.get('b365_over25')) and pd.notna(row.get('b365_under25')):
-            try:
-                ou_open_imp = 1 / float(row['b365_over25'])
-            except:
-                pass
-        if pd.notna(row.get('b365c_over25')) and pd.notna(row.get('b365c_under25')):
-            try:
-                ou_close_imp = 1 / float(row['b365c_over25'])
-            except:
-                pass
-        if ou_open_imp and ou_close_imp:
-            ou_movement = ou_close_imp - ou_open_imp
+                home_rank = get_team_rank(standings, home_team)
+                away_rank = get_team_rank(standings, away_team)
+                rank_diff = None
+                if home_rank and away_rank:
+                    rank_diff = away_rank - home_rank
 
-        # --- NEW FEATURES (v2) ---
+                home_wdl = get_wdl_ratio(team_records.get(home_key, []), match_dt, 5)
+                away_wdl = get_wdl_ratio(team_records.get(away_key, []), match_dt, 5)
 
-        # 1. League rankings
-        standings = compute_league_standings(team_records, match_dt, league, season)
-        home_rank = get_team_rank(standings, home_team)
-        away_rank = get_team_rank(standings, away_team)
-        rank_diff = None
-        if home_rank and away_rank:
-            rank_diff = away_rank - home_rank  # Positive = home team ranked higher
+                h2h_dev = get_h2h_deviation(h2h_records, home_team, away_team, match_dt, row['ah_line'])
 
-        # 2. W/D/L ratios (last 5)
-        home_wdl = get_wdl_ratio(team_records[home_key], match_dt, 5) if home_key in team_records else None
-        away_wdl = get_wdl_ratio(team_records[away_key], match_dt, 5) if away_key in team_records else None
+                home_adv = get_home_away_advantage(team_records, home_team, match_dt, league, season, True)
+                away_adv = get_home_away_advantage(team_records, away_team, match_dt, league, season, False)
 
-        # 3. H2H deviation
-        h2h_dev = get_h2h_deviation(h2h_records, home_team, away_team, match_dt, row['ah_line'])
+                if match_id in existing:
+                    skipped += 1
+                    continue
 
-        # 4. Home/away advantage
-        home_adv = get_home_away_advantage(team_records, home_team, match_dt, league, season, True)
-        away_adv = get_home_away_advantage(team_records, away_team, match_dt, league, season, False)
+                cursor.execute("""
+                    INSERT OR REPLACE INTO features (
+                        match_id,
+                        home_form_gf, home_form_ga, home_form_pts,
+                        away_form_gf, away_form_ga, away_form_pts,
+                        home_season_gf, home_season_ga, home_season_pts_avg,
+                        away_season_gf, away_season_ga, away_season_pts_avg,
+                        h2h_home_wins, h2h_draws, h2h_away_wins,
+                        ah_line_movement, ah_home_odds_movement, ah_away_odds_movement,
+                        ou_25_opening_implied, ou_25_closing_implied, ou_movement,
+                        is_home_favorite, ah_result,
+                        home_rank, away_rank, rank_diff,
+                        home_wdl_w, home_wdl_d, home_wdl_l,
+                        away_wdl_w, away_wdl_d, away_wdl_l,
+                        h2h_deviation,
+                        home_advantage, away_advantage
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    match_id,
+                    home_form[0] if home_form else None,
+                    home_form[1] if home_form else None,
+                    home_form[2] if home_form else None,
+                    away_form[0] if away_form else None,
+                    away_form[1] if away_form else None,
+                    away_form[2] if away_form else None,
+                    home_season[0] if home_season else None,
+                    home_season[1] if home_season else None,
+                    home_season[2] if home_season else None,
+                    away_season[0] if away_season else None,
+                    away_season[1] if away_season else None,
+                    away_season[2] if away_season else None,
+                    h2h[0], h2h[1], h2h[2],
+                    ah_line_movement,
+                    ah_home_odds_movement,
+                    ah_away_odds_movement,
+                    ou_open_imp,
+                    ou_close_imp,
+                    ou_movement,
+                    int(row['is_home_favorite']) if pd.notna(row['is_home_favorite']) else None,
+                    row['ah_result'],
+                    home_rank,
+                    away_rank,
+                    rank_diff,
+                    home_wdl['w'] if home_wdl else None,
+                    home_wdl['d'] if home_wdl else None,
+                    home_wdl['l'] if home_wdl else None,
+                    away_wdl['w'] if away_wdl else None,
+                    away_wdl['d'] if away_wdl else None,
+                    away_wdl['l'] if away_wdl else None,
+                    h2h_dev,
+                    home_adv,
+                    away_adv
+                ))
+                processed += 1
+                if processed % 2000 == 0:
+                    conn.commit()
+                    print(f"[Features] Processed {processed} new matches...")
 
-        cursor.execute("""
-            INSERT OR REPLACE INTO features (
-                match_id,
-                home_form_gf, home_form_ga, home_form_pts,
-                away_form_gf, away_form_ga, away_form_pts,
-                home_season_gf, home_season_ga, home_season_pts_avg,
-                away_season_gf, away_season_ga, away_season_pts_avg,
-                h2h_home_wins, h2h_draws, h2h_away_wins,
-                ah_line_movement, ah_home_odds_movement, ah_away_odds_movement,
-                ou_25_opening_implied, ou_25_closing_implied, ou_movement,
-                is_home_favorite, ah_result,
-                home_rank, away_rank, rank_diff,
-                home_wdl_w, home_wdl_d, home_wdl_l,
-                away_wdl_w, away_wdl_d, away_wdl_l,
-                h2h_deviation,
-                home_advantage, away_advantage
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            match_id,
-            home_form[0] if home_form else None,
-            home_form[1] if home_form else None,
-            home_form[2] if home_form else None,
-            away_form[0] if away_form else None,
-            away_form[1] if away_form else None,
-            away_form[2] if away_form else None,
-            home_season[0] if home_season else None,
-            home_season[1] if home_season else None,
-            home_season[2] if home_season else None,
-            away_season[0] if away_season else None,
-            away_season[1] if away_season else None,
-            away_season[2] if away_season else None,
-            h2h[0], h2h[1], h2h[2],
-            ah_line_movement,
-            ah_home_odds_movement,
-            ah_away_odds_movement,
-            ou_open_imp,
-            ou_close_imp,
-            ou_movement,
-            int(row['is_home_favorite']) if pd.notna(row['is_home_favorite']) else None,
-            row['ah_result'],
-            home_rank,
-            away_rank,
-            rank_diff,
-            home_wdl['w'] if home_wdl else None,
-            home_wdl['d'] if home_wdl else None,
-            home_wdl['l'] if home_wdl else None,
-            away_wdl['w'] if away_wdl else None,
-            away_wdl['d'] if away_wdl else None,
-            away_wdl['l'] if away_wdl else None,
-            h2h_dev,
-            home_adv,
-            away_adv
-        ))
+            # Apply this date's results to standings (same-date matches excluded
+            # from each other's standings, matching original semantics)
+            for _, row in ddf.iterrows():
+                if pd.isna(row['ftr']):
+                    continue
+                ftr = row['ftr']
+                for team, gf, ga, pts in (
+                    (row['home_team'], row['fthg'], row['ftag'],
+                     3 if ftr == 'H' else (1 if ftr == 'D' else 0)),
+                    (row['away_team'], row['ftag'], row['fthg'],
+                     3 if ftr == 'A' else (1 if ftr == 'D' else 0)),
+                ):
+                    st = standings.setdefault(team, {
+                        'points': 0, 'played': 0, 'wins': 0, 'draws': 0,
+                        'losses': 0, 'gf': 0, 'ga': 0, 'gd': 0})
+                    st['played'] += 1
+                    st['points'] += pts
+                    st['gf'] += int(gf or 0)
+                    st['ga'] += int(ga or 0)
+                    st['gd'] = st['gf'] - st['ga']
+                    if pts == 3:
+                        st['wins'] += 1
+                    elif pts == 1:
+                        st['draws'] += 1
+                    else:
+                        st['losses'] += 1
+        conn.commit()
+        print(f"[Features] League {league}: {processed} total new, {skipped} skipped.")
 
-        processed += 1
-        if processed % 1000 == 0:
-            print(f"[Features] Processed {processed} matches...")
-
-    conn.commit()
     conn.close()
-    print(f"[Features] Feature engineering complete. {processed} matches processed.")
+    print(f"[Features] Feature engineering complete. {processed} new, {skipped} skipped.")
     return processed
 
 

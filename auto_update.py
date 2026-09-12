@@ -17,8 +17,17 @@ LEAGUE_CODES = {
     'F1': 'Ligue_1',
     'F2': 'Ligue_2',
     'SP1': 'La_Liga',
-    'SP2': 'La_Liga_2'
+    'SP2': 'La_Liga_2',
+    'N1': 'Eredivisie',
+    'B1': 'Belgium_Pro',
+    'E0': 'EPL',
+    'E1': 'Championship',
+    'D1': 'Bundesliga',
+    'D2': 'Bundesliga_2',
 }
+
+# New-format single-file leagues (football-data.co.uk/new/{CODE}.csv)
+NEW_FORMAT_CODES = ['BRA', 'ARG', 'MEX', 'USA', 'JPN']
 
 BASE_URL = 'https://www.football-data.co.uk/mmz4281'
 RAW_DIR = os.path.join(os.path.dirname(__file__), 'data', 'raw')
@@ -124,17 +133,61 @@ def run_update_pipeline():
             _is_updating = False
 
 
-def fetch_live_odds():
-    """Fetch live odds with a cooldown to protect API quota."""
+def fetch_live_odds(force_all=False):
+    """
+    Fetch live odds with a cooldown to protect API quota.
+    Rotation: fetches 1/3 of leagues per run (each league refreshed every 3 days),
+    unless live_odds is empty (initial population) or force_all=True.
+    The Odds API free tier: 500 credits/month; each league = 2 credits.
+    """
     global _last_odds_fetch
     now = datetime.now()
     if _last_odds_fetch and (now - _last_odds_fetch).total_seconds() < ODDS_FETCH_COOLDOWN_MINUTES * 60:
         print(f"[AutoUpdate] Odds fetch skipped (cooldown, last: {_last_odds_fetch.strftime('%H:%M:%S')})")
         return []
-    from odds_fetcher import fetch_all_odds
-    matches = fetch_all_odds()
+
+    from odds_fetcher import fetch_all_odds, LEAGUE_TO_SPORT
+    import sqlite3
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT COUNT(*) FROM live_odds").fetchone()
+    conn.close()
+    live_count = row[0] if row else 0
+
+    if force_all or live_count < 20:
+        matches = fetch_all_odds()  # full fetch: initial population
+    else:
+        # Rotate: each league fetched every 3 days
+        leagues = sorted(LEAGUE_TO_SPORT.keys())
+        bucket = now.timetuple().tm_yday % 3
+        subset = [lg for i, lg in enumerate(leagues) if i % 3 == bucket]
+        print(f"[AutoUpdate] Odds rotation bucket {bucket}: {len(subset)} leagues")
+        matches = fetch_all_odds(leagues=subset)
+
     _last_odds_fetch = now
     return matches
+
+
+def download_new_format():
+    """Download new-format single-file CSVs (results only). Skip if <7 days old."""
+    downloaded = []
+    for code in NEW_FORMAT_CODES:
+        url = f"https://www.football-data.co.uk/new/{code}.csv"
+        filepath = os.path.join(RAW_DIR, f"new_{code}.csv")
+        # Skip recent downloads
+        if os.path.exists(filepath):
+            age_days = (datetime.now() - datetime.fromtimestamp(os.path.getmtime(filepath))).days
+            if age_days < 7:
+                continue
+        try:
+            resp = requests.get(url, timeout=60)
+            if resp.status_code == 200 and len(resp.content) > 5000:
+                with open(filepath, 'wb') as f:
+                    f.write(resp.content)
+                downloaded.append(f"new_{code}.csv")
+                print(f"[AutoUpdate] Downloaded new_{code}.csv ({len(resp.content)} bytes)")
+        except Exception as e:
+            print(f"[AutoUpdate] Error downloading new_{code}: {e}")
+    return downloaded
 
 
 def check_and_update():
@@ -165,6 +218,9 @@ def check_and_update():
     downloaded = []
     downloaded.extend(download_season(current_season))
     downloaded.extend(download_season(next_season))
+
+    # Download new-format single-file leagues
+    downloaded.extend(download_new_format())
     
     # Also re-download the latest season in case of updates
     if latest_season and latest_season not in [current_season, next_season]:

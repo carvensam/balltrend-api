@@ -80,7 +80,20 @@ def leagues():
             {'code': 'Ligue_1', 'name': '法國甲組聯賽'},
             {'code': 'Ligue_2', 'name': '法國乙組聯賽'},
             {'code': 'La_Liga', 'name': '西班牙甲組聯賽'},
-            {'code': 'La_Liga_2', 'name': '西班牙乙組聯賽'}
+            {'code': 'La_Liga_2', 'name': '西班牙乙組聯賽'},
+            {'code': 'Eredivisie', 'name': '荷蘭甲組聯賽'},
+            {'code': 'Belgium_Pro', 'name': '比利時甲組聯賽'},
+            {'code': 'EPL', 'name': '英格蘭超級聯賽'},
+            {'code': 'Championship', 'name': '英格蘭冠軍聯賽'},
+            {'code': 'Bundesliga', 'name': '德國甲組聯賽'},
+            {'code': 'Bundesliga_2', 'name': '德國乙組聯賽'},
+            {'code': 'Brazil_A', 'name': '巴西甲組聯賽'},
+            {'code': 'Argentina_A', 'name': '阿根廷甲組聯賽'},
+            {'code': 'Chile_A', 'name': '智利甲組聯賽'},
+            {'code': 'Mexico_A', 'name': '墨西哥超級聯賽'},
+            {'code': 'MLS', 'name': '美國職業聯賽'},
+            {'code': 'KLeague_1', 'name': '南韓職業聯賽'},
+            {'code': 'JLeague_1', 'name': '日本職業聯賽'},
         ]
     })
 

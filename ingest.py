@@ -30,9 +30,92 @@ def league_code(filename):
         'F1': 'Ligue_1',
         'F2': 'Ligue_2',
         'SP1': 'La_Liga',
-        'SP2': 'La_Liga_2'
+        'SP2': 'La_Liga_2',
+        'N1': 'Eredivisie',
+        'B1': 'Belgium_Pro',
+        'E0': 'EPL',
+        'E1': 'Championship',
+        'D1': 'Bundesliga',
+        'D2': 'Bundesliga_2',
     }
     return mapping.get(base, base)
+
+
+# New-format single-file leagues (football-data.co.uk/new/{CODE}.csv)
+# These have results but NO Asian handicap columns
+# Note: CHI.csv on football-data.co.uk is CHINA's league, not Chile -
+# Chile (Chile_A) has no historical data source, live odds only.
+NEW_FORMAT_LEAGUES = {
+    'BRA': 'Brazil_A',
+    'ARG': 'Argentina_A',
+    'MEX': 'Mexico_A',
+    'USA': 'MLS',
+    'JPN': 'JLeague_1',
+}
+
+
+def parse_new_season(season_str):
+    """
+    Convert Season column to compact code:
+    '2019/2020' -> '1920'; '2026' (calendar-year league) -> '2626'.
+    """
+    s = str(season_str).strip()
+    try:
+        if '/' in s:
+            parts = s.split('/')
+            return f"{parts[0].strip()[-2:]}{parts[1].strip()[-2:]}"
+        if len(s) >= 4 and s[:4].isdigit():
+            return f"{s[2:4]}{s[2:4]}"
+    except Exception:
+        pass
+    return 'unknown'
+
+
+def ingest_new_format_csv(filepath):
+    """
+    Ingest a football-data.co.uk/new/ CSV (results only, no AH odds).
+    Inserts into matches table only (no odds row), enabling form/H2H
+    features for live prediction.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    code = os.path.splitext(os.path.basename(filepath))[0].replace('new_', '')
+    league = NEW_FORMAT_LEAGUES.get(code)
+    if not league:
+        conn.close()
+        return 0
+
+    df = pd.read_csv(filepath, encoding='utf-8-sig')
+    count = 0
+    for _, row in df.iterrows():
+        if pd.isna(row.get('Date')) or pd.isna(row.get('Home')) or pd.isna(row.get('Away')):
+            continue
+        match_date = parse_date(row.get('Date'))
+        if not match_date:
+            continue
+        season = parse_new_season(row.get('Season'))
+        res = str(row.get('Res', '')).strip().upper()  # H / D / A
+        if res not in ('H', 'D', 'A'):
+            res = None
+        cursor.execute("""
+            INSERT OR IGNORE INTO matches
+            (league, season, match_date, match_time, home_team, away_team,
+             fthg, ftag, ftr, hthg, htag, htr)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+        """, (
+            league, season, match_date,
+            str(row.get('Time', '')) if pd.notna(row.get('Time')) else None,
+            str(row.get('Home', '')).strip(),
+            str(row.get('Away', '')).strip(),
+            safe_int(row.get('HG')),
+            safe_int(row.get('AG')),
+            res
+        ))
+        count += 1
+    conn.commit()
+    conn.close()
+    print(f"[Ingest] {league} (new format): {count} rows processed.")
+    return count
 
 
 def season_code(filename):
@@ -55,6 +138,12 @@ def ingest_all_csvs(raw_dir='data/raw'):
     total_matches = 0
 
     for filepath in files:
+        # Route new-format single files (BRA, ARG, ...) to dedicated ingester
+        base_name = os.path.basename(filepath)
+        if base_name.startswith('new_'):
+            total_matches += ingest_new_format_csv(filepath)
+            continue
+
         league = league_code(filepath)
         season = season_code(filepath)
         print(f"[Ingest] Processing {league} {season}...")
