@@ -22,13 +22,10 @@ FD_LEAGUE_IDS = {
     # Ligue_2 and La_Liga_2 not available on free tier of football-data.org
 }
 
-# League name mappings (English -> Traditional Chinese)
-LEAGUE_NAMES_ZH = {
-    'Ligue_1': '法國甲組聯賽',
-    'Ligue_2': '法國乙組聯賽',
-    'La_Liga': '西班牙甲組聯賽',
-    'La_Liga_2': '西班牙乙組聯賽',
-}
+# League name mappings (league code -> Traditional Chinese)
+# Sourced from odds_fetcher.LEAGUE_NAMES_ZH (single source of truth)
+from odds_fetcher import LEAGUE_NAMES_ZH as _ODDS_LEAGUE_ZH
+LEAGUE_NAMES_ZH = dict(_ODDS_LEAGUE_ZH)
 
 # Team name mappings (English official name -> Traditional Chinese)
 # Based on actual names returned by football-data.org API
